@@ -55,6 +55,7 @@ cmake --build build --config Release
 ```
 
 Ergebnis: `build/OpenLabCheckIn.exe` (statisch gelinkt).
+Ausführliche Anleitung (Voraussetzungen, MSYS2, Optionen, Fehlerbehebung): [docs/build-mingw.md](docs/build-mingw.md)
 
 ## Projektstruktur
 
