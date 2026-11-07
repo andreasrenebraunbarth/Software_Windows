@@ -36,6 +36,17 @@ struct Visit {
     long long seconds(time_t now) const { return (long long)((present() ? now : checkOut) - checkIn); }
 };
 
+// Admin-Zugang für die Reiter "Mitglieder" und "Verlauf & Statistik".
+// Gespeichert wird nur ein Hash (PBKDF2-HMAC-SHA256 mit zufälligem Salt), nie das Passwort selbst.
+struct AdminAccount {
+    std::wstring user;
+    std::wstring salt;        // hex
+    std::wstring hash;        // hex
+    unsigned iterations = 0;
+
+    bool configured() const { return !user.empty() && !hash.empty(); }
+};
+
 extern const wchar_t* const kMembershipTypes[];
 extern const int kMembershipTypeCount;
 
@@ -46,6 +57,7 @@ class Store {
 public:
     std::vector<Member> members;
     std::vector<Visit> visits;
+    AdminAccount admin;
     std::wstring dir;
     std::wstring file;
 
@@ -57,6 +69,11 @@ public:
     Member* findMember(int64_t id);
     Visit* findVisit(int64_t id);
     Visit* openVisitFor(int64_t memberId);
+
+    // Setzt Benutzername und Passwort neu (speichert noch nicht). false, wenn der Hash nicht erzeugt werden kann.
+    bool setAdmin(const std::wstring& user, const std::wstring& password);
+    // Prüft Benutzername (ohne Groß-/Kleinschreibung) und Passwort.
+    bool checkAdmin(const std::wstring& user, const std::wstring& password) const;
 
 private:
     int64_t nextId_ = 1;

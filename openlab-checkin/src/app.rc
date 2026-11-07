@@ -1,4 +1,6 @@
+#pragma code_page(65001)
 #include <windows.h>
+#include "resource.h"
 
 1 ICON "app.ico"
 1 RT_MANIFEST "app.manifest"
@@ -25,4 +27,56 @@ BEGIN
   BEGIN
     VALUE "Translation", 0x0407, 1200
   END
+END
+
+// ------------------------------------------------------------------ Admin-Dialoge
+
+IDD_LOGIN DIALOGEX 0, 0, 250, 134
+STYLE DS_MODALFRAME | DS_CENTER | DS_SHELLFONT | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "Admin-Anmeldung"
+FONT 9, "Segoe UI", 400, 0, 1
+BEGIN
+  LTEXT "Der Bereich „Mitglieder“ und „Verlauf && Statistik“ ist nur für Admins. Bitte anmelden.", IDC_D_INFO, 10, 8, 230, 20
+  LTEXT "Benutzername", -1, 10, 34, 230, 9
+  EDITTEXT IDC_D_USER, 10, 44, 230, 14, ES_AUTOHSCROLL
+  LTEXT "Passwort", -1, 10, 64, 230, 9
+  EDITTEXT IDC_D_PASS, 10, 74, 230, 14, ES_AUTOHSCROLL | ES_PASSWORD
+  LTEXT "", IDC_D_ERROR, 10, 94, 230, 10
+  DEFPUSHBUTTON "Anmelden", IDOK, 126, 112, 55, 15
+  PUSHBUTTON "Abbrechen", IDCANCEL, 185, 112, 55, 15
+END
+
+IDD_SETUP DIALOGEX 0, 0, 250, 162
+STYLE DS_MODALFRAME | DS_CENTER | DS_SHELLFONT | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "Admin-Zugang einrichten"
+FONT 9, "Segoe UI", 400, 0, 1
+BEGIN
+  LTEXT "Es gibt noch keinen Admin-Zugang. Lege jetzt Benutzername und Passwort fest. Danach sind „Mitglieder“ und „Verlauf && Statistik“ nur nach Anmeldung erreichbar.", IDC_D_INFO, 10, 8, 230, 28
+  LTEXT "Benutzername", -1, 10, 40, 230, 9
+  EDITTEXT IDC_D_USER, 10, 50, 230, 14, ES_AUTOHSCROLL
+  LTEXT "Passwort (mindestens 6 Zeichen)", -1, 10, 70, 230, 9
+  EDITTEXT IDC_D_PASS, 10, 80, 230, 14, ES_AUTOHSCROLL | ES_PASSWORD
+  LTEXT "Passwort wiederholen", -1, 10, 100, 230, 9
+  EDITTEXT IDC_D_PASS2, 10, 110, 230, 14, ES_AUTOHSCROLL | ES_PASSWORD
+  LTEXT "", IDC_D_ERROR, 10, 128, 230, 10
+  DEFPUSHBUTTON "Speichern", IDOK, 126, 141, 55, 15
+  PUSHBUTTON "Abbrechen", IDCANCEL, 185, 141, 55, 15
+END
+
+IDD_CHANGE DIALOGEX 0, 0, 250, 178
+STYLE DS_MODALFRAME | DS_CENTER | DS_SHELLFONT | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "Admin-Zugang ändern"
+FONT 9, "Segoe UI", 400, 0, 1
+BEGIN
+  LTEXT "Benutzername", -1, 10, 8, 230, 9
+  EDITTEXT IDC_D_USER, 10, 18, 230, 14, ES_AUTOHSCROLL
+  LTEXT "Aktuelles Passwort", -1, 10, 40, 230, 9
+  EDITTEXT IDC_D_CURRENT, 10, 50, 230, 14, ES_AUTOHSCROLL | ES_PASSWORD
+  LTEXT "Neues Passwort (mindestens 6 Zeichen)", -1, 10, 72, 230, 9
+  EDITTEXT IDC_D_PASS, 10, 82, 230, 14, ES_AUTOHSCROLL | ES_PASSWORD
+  LTEXT "Neues Passwort wiederholen", -1, 10, 102, 230, 9
+  EDITTEXT IDC_D_PASS2, 10, 112, 230, 14, ES_AUTOHSCROLL | ES_PASSWORD
+  LTEXT "", IDC_D_ERROR, 10, 132, 230, 18
+  DEFPUSHBUTTON "Speichern", IDOK, 126, 156, 55, 15
+  PUSHBUTTON "Abbrechen", IDCANCEL, 185, 156, 55, 15
 END

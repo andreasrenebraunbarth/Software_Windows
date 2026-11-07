@@ -4,6 +4,7 @@
 #include "model.h"
 
 #include <windows.h>
+#include <bcrypt.h>
 
 #include <algorithm>
 #include <cwchar>
@@ -246,6 +247,7 @@ static long long num(const std::wstring& s) { return std::wcstoll(s.c_str(), nul
 bool Store::load(std::wstring& error) {
     members.clear();
     visits.clear();
+    admin = AdminAccount();
     if (!fileExists(file)) return true;
 
     // tägliche Sicherung
@@ -291,6 +293,11 @@ bool Store::load(std::wstring& error) {
             m.joinDate = (time_t)num(c[11]);
             maxId = std::max(maxId, m.id);
             members.push_back(m);
+        } else if (c[0] == L"A" && c.size() >= 5) {
+            admin.user = c[1];
+            admin.salt = c[2];
+            admin.iterations = (unsigned)num(c[3]);
+            admin.hash = c[4];
         } else if (c[0] == L"V" && c.size() >= 8) {
             Visit v;
             v.id = num(c[1]);
@@ -311,6 +318,8 @@ bool Store::load(std::wstring& error) {
 bool Store::save(std::wstring& error) const {
     std::wstring out = L"# OpenLab Augsburg Check-in – Datendatei (UTF-8, Tab-getrennt)\n";
     auto s = [](long long v) { return std::to_wstring(v); };
+    if (admin.configured())
+        out += L"A\t" + esc(admin.user) + L"\t" + admin.salt + L"\t" + s(admin.iterations) + L"\t" + admin.hash + L"\n";
     for (auto& m : members) {
         out += L"M\t" + s(m.id) + L"\t" + esc(m.number) + L"\t" + esc(m.first) + L"\t" + esc(m.last) + L"\t" +
                esc(m.email) + L"\t" + esc(m.phone) + L"\t" + esc(m.card) + L"\t" + esc(m.type) + L"\t" +
@@ -350,4 +359,60 @@ Visit* Store::openVisitFor(int64_t memberId) {
     for (auto& v : visits)
         if (v.memberId == memberId && !v.guest && v.present()) return &v;
     return nullptr;
+}
+
+// ------------------------------------------------------------------ Admin-Zugang
+
+static const unsigned kPbkdf2Iterations = 200000;
+
+static std::wstring toHex(const std::vector<unsigned char>& bytes) {
+    static const wchar_t* digits = L"0123456789abcdef";
+    std::wstring r;
+    for (unsigned char b : bytes) {
+        r += digits[b >> 4];
+        r += digits[b & 15];
+    }
+    return r;
+}
+
+static std::vector<unsigned char> fromHex(const std::wstring& hex) {
+    auto val = [](wchar_t c) { return c <= L'9' ? c - L'0' : (c | 0x20) - L'a' + 10; };
+    std::vector<unsigned char> r;
+    for (size_t i = 0; i + 1 < hex.size(); i += 2) r.push_back((unsigned char)(val(hex[i]) * 16 + val(hex[i + 1])));
+    return r;
+}
+
+// PBKDF2-HMAC-SHA256 über das UTF-8-Passwort; leer bei Fehler
+static std::wstring derive(const std::wstring& password, const std::vector<unsigned char>& salt, unsigned iterations) {
+    BCRYPT_ALG_HANDLE alg = nullptr;
+    if (BCryptOpenAlgorithmProvider(&alg, BCRYPT_SHA256_ALGORITHM, nullptr, BCRYPT_ALG_HANDLE_HMAC_FLAG) < 0)
+        return {};
+    std::string pw = util::toUtf8(password);
+    std::vector<unsigned char> key(32);
+    NTSTATUS st = BCryptDeriveKeyPBKDF2(alg, (PUCHAR)pw.data(), (ULONG)pw.size(), (PUCHAR)salt.data(),
+                                        (ULONG)salt.size(), iterations, key.data(), (ULONG)key.size(), 0);
+    BCryptCloseAlgorithmProvider(alg, 0);
+    SecureZeroMemory(&pw[0], pw.size());
+    return st < 0 ? std::wstring() : toHex(key);
+}
+
+bool Store::setAdmin(const std::wstring& user, const std::wstring& password) {
+    std::vector<unsigned char> salt(16);
+    if (BCryptGenRandom(nullptr, salt.data(), (ULONG)salt.size(), BCRYPT_USE_SYSTEM_PREFERRED_RNG) < 0) return false;
+    std::wstring hash = derive(password, salt, kPbkdf2Iterations);
+    if (hash.empty()) return false;
+    admin.user = user;
+    admin.salt = toHex(salt);
+    admin.iterations = kPbkdf2Iterations;
+    admin.hash = hash;
+    return true;
+}
+
+bool Store::checkAdmin(const std::wstring& user, const std::wstring& password) const {
+    if (!admin.configured() || admin.iterations == 0) return false;
+    std::wstring hash = derive(password, fromHex(admin.salt), admin.iterations);
+    if (hash.empty() || hash.size() != admin.hash.size()) return false;
+    unsigned diff = 0;  // Vergleich in konstanter Zeit
+    for (size_t i = 0; i < hash.size(); ++i) diff |= (unsigned)(hash[i] ^ admin.hash[i]);
+    return diff == 0 && util::equalsCI(user, admin.user);
 }
