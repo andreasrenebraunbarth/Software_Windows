@@ -21,6 +21,7 @@
 #include <vector>
 
 #include "model.h"
+#include "resource.h"
 
 // ------------------------------------------------------------------ IDs
 
@@ -41,6 +42,8 @@ enum : int {
     // Verlauf
     IDC_H_FROM_L, IDC_H_FROM, IDC_H_TO_L, IDC_H_TO, IDC_H_TODAY, IDC_H_MONTH, IDC_H_YEAR,
     IDC_H_SEARCH_L, IDC_H_SEARCH, IDC_H_EXPORT, IDC_H_STATS, IDC_H_LIST,
+    // Admin (sichtbar auf den geschützten Reitern)
+    IDC_ADMIN_CHANGE, IDC_ADMIN_LOGOUT,
 };
 
 enum StatusKind { ST_INFO, ST_SUCCESS, ST_GOODBYE, ST_ERROR };
@@ -65,6 +68,10 @@ static int64_t gSelectedMemberId = 0;
 static bool gIsNewMember = false;
 static bool gEditing = false;
 static bool gSuppressSelection = false;
+
+// Admin-Bereich (Reiter "Mitglieder" und "Verlauf & Statistik")
+static bool gAdminUnlocked = false;
+static const DWORD kAdminIdleMs = 10 * 60 * 1000;  // automatisch sperren nach 10 Minuten ohne Eingabe
 
 static const COLORREF kHeader = RGB(0x1F, 0x2A, 0x36);
 static const COLORREF kAccent = RGB(0xF2, 0x8C, 0x28);
@@ -746,6 +753,142 @@ static void setHistoryRange(time_t from, time_t to) {
     refreshHistory();
 }
 
+// ------------------------------------------------------------------ Admin-Anmeldung
+
+static void dlgError(HWND dlg, const wchar_t* msg, int focusId) {
+    SetDlgItemTextW(dlg, IDC_D_ERROR, msg);
+    HWND f = GetDlgItem(dlg, focusId);
+    SetFocus(f);
+    SendMessageW(f, EM_SETSEL, 0, -1);
+}
+
+static std::wstring dlgText(HWND dlg, int id) {
+    HWND h = GetDlgItem(dlg, id);
+    return h ? getText(h) : std::wstring();
+}
+
+// Ein Dialog-Proc für alle drei Admin-Dialoge (IDD_LOGIN, IDD_SETUP, IDD_CHANGE); lParam = Dialog-ID
+static INT_PTR CALLBACK AdminDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp) {
+    switch (msg) {
+        case WM_INITDIALOG:
+            SetWindowLongPtrW(dlg, DWLP_USER, lp);
+            for (int id : {IDC_D_USER, IDC_D_CURRENT, IDC_D_PASS, IDC_D_PASS2})
+                if (HWND e = GetDlgItem(dlg, id)) SendMessageW(e, EM_LIMITTEXT, 128, 0);
+            if (lp == IDD_CHANGE) SetDlgItemTextW(dlg, IDC_D_USER, gStore.admin.user.c_str());
+            SetFocus(GetDlgItem(dlg, lp == IDD_CHANGE ? IDC_D_CURRENT : IDC_D_USER));
+            return FALSE;  // Fokus selbst gesetzt
+
+        case WM_CTLCOLORSTATIC:
+            if (GetDlgCtrlID((HWND)lp) == IDC_D_ERROR) {
+                SetTextColor((HDC)wp, RGB(0xC0, 0x39, 0x2B));
+                SetBkMode((HDC)wp, TRANSPARENT);
+                return (INT_PTR)GetSysColorBrush(COLOR_BTNFACE);
+            }
+            return FALSE;
+
+        case WM_COMMAND:
+            if (LOWORD(wp) == IDCANCEL) {
+                EndDialog(dlg, IDCANCEL);
+                return TRUE;
+            }
+            if (LOWORD(wp) == IDOK) {
+                INT_PTR mode = GetWindowLongPtrW(dlg, DWLP_USER);
+                std::wstring user = util::trim(dlgText(dlg, IDC_D_USER));
+                std::wstring pass = dlgText(dlg, IDC_D_PASS);
+                std::wstring pass2 = dlgText(dlg, IDC_D_PASS2);
+                std::wstring current = dlgText(dlg, IDC_D_CURRENT);
+                HCURSOR oldCursor = SetCursor(LoadCursorW(nullptr, IDC_WAIT));
+
+                if (mode == IDD_LOGIN) {
+                    bool ok = gStore.checkAdmin(user, pass);
+                    SetCursor(oldCursor);
+                    if (!ok) {
+                        SetDlgItemTextW(dlg, IDC_D_PASS, L"");
+                        dlgError(dlg, L"Benutzername oder Passwort ist falsch.", user.empty() ? IDC_D_USER : IDC_D_PASS);
+                        return TRUE;
+                    }
+                    EndDialog(dlg, IDOK);
+                    return TRUE;
+                }
+
+                // IDD_SETUP / IDD_CHANGE
+                if (mode == IDD_CHANGE && !gStore.checkAdmin(gStore.admin.user, current)) {
+                    SetCursor(oldCursor);
+                    SetDlgItemTextW(dlg, IDC_D_CURRENT, L"");
+                    dlgError(dlg, L"Das aktuelle Passwort ist falsch.", IDC_D_CURRENT);
+                    return TRUE;
+                }
+                SetCursor(oldCursor);
+                if (user.empty()) {
+                    dlgError(dlg, L"Bitte einen Benutzernamen angeben.", IDC_D_USER);
+                } else if (pass.size() < 6) {
+                    dlgError(dlg, L"Das Passwort muss mindestens 6 Zeichen lang sein.", IDC_D_PASS);
+                } else if (pass != pass2) {
+                    SetDlgItemTextW(dlg, IDC_D_PASS2, L"");
+                    dlgError(dlg, L"Die beiden Passwörter stimmen nicht überein.", IDC_D_PASS2);
+                } else if (!gStore.setAdmin(user, pass)) {
+                    dlgError(dlg, L"Das Passwort konnte nicht verschlüsselt werden.", IDC_D_PASS);
+                } else {
+                    EndDialog(dlg, IDOK);
+                }
+                return TRUE;
+            }
+            return FALSE;
+    }
+    return FALSE;
+}
+
+static bool runAdminDialog(int id) { return DialogBoxParamW(gInst, MAKEINTRESOURCEW(id), gMain, AdminDlgProc, id) == IDOK; }
+
+// Fragt bei Bedarf nach dem Admin-Zugang (bzw. lässt ihn beim ersten Mal einrichten).
+static bool requireAdmin() {
+    if (gAdminUnlocked) return true;
+    if (!gStore.admin.configured()) {
+        if (!runAdminDialog(IDD_SETUP)) return false;
+        gAdminUnlocked = true;
+        setStatus(L"Admin-Zugang \x201E" + gStore.admin.user + L"\x201C eingerichtet und angemeldet.", ST_SUCCESS);
+        persist();
+        return true;
+    }
+    if (!runAdminDialog(IDD_LOGIN)) return false;
+    gAdminUnlocked = true;
+    setStatus(L"Als Admin angemeldet. Bitte nach der Arbeit \x201E" L"Abmelden\x201C klicken.", ST_INFO);
+    return true;
+}
+
+static void showPage(int page);
+
+static void lockAdmin(const std::wstring& message) {
+    gAdminUnlocked = false;
+    // offenes Formular verwerfen, damit nach dem Sperren nichts sichtbar bleibt
+    gSelectedMemberId = 0;
+    gIsNewMember = false;
+    clearForm();
+    setFormEnabled(false);
+    setText(IDC_M_SEARCH, L"");
+    setText(IDC_H_SEARCH, L"");
+    refreshMembers();
+    TabCtrl_SetCurSel(gTab, 0);
+    showPage(0);
+    setStatus(message, ST_INFO);
+}
+
+static void doChangeAdmin() {
+    if (!gAdminUnlocked) return;
+    if (runAdminDialog(IDD_CHANGE)) {
+        setStatus(L"Admin-Zugang ge\x00E4ndert (Benutzer \x201E" + gStore.admin.user + L"\x201C).", ST_SUCCESS);
+        persist();
+    }
+}
+
+static void checkAdminIdle() {
+    if (!gAdminUnlocked || !IsWindowEnabled(gMain)) return;  // nicht während ein Dialog offen ist
+    LASTINPUTINFO li{};
+    li.cbSize = sizeof(li);
+    if (GetLastInputInfo(&li) && GetTickCount() - li.dwTime > kAdminIdleMs)
+        lockAdmin(L"Admin-Bereich wurde nach 10 Minuten ohne Eingabe automatisch gesperrt.");
+}
+
 // ------------------------------------------------------------------ Steuerelemente anlegen
 
 static LRESULT CALLBACK EnterSubclass(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR target) {
@@ -762,7 +905,7 @@ static HWND make(int page, const wchar_t* cls, const wchar_t* text, DWORD style,
     HWND h = CreateWindowExW(exStyle, cls, text, WS_CHILD | WS_CLIPSIBLINGS | style, 0, 0, 10, 10, gMain,
                              (HMENU)(INT_PTR)id, gInst, nullptr);
     SendMessageW(h, WM_SETFONT, (WPARAM)(font ? font : gFont), TRUE);
-    gPage[page].push_back(h);
+    if (page >= 0) gPage[page].push_back(h);
     return h;
 }
 
@@ -896,6 +1039,10 @@ static void createControls() {
     setDate(IDC_H_FROM, mktime(&r));
     setDate(IDC_H_TO, util::today());
 
+    // Admin-Knöpfe rechts neben den Reitern (nur auf den geschützten Seiten sichtbar)
+    button(-1, L"Zugang \x00E4ndern", IDC_ADMIN_CHANGE);
+    button(-1, L"Abmelden", IDC_ADMIN_LOGOUT, gFontBold);
+
     // Reiter-Steuerelement ganz nach hinten, damit es die Seiten nicht übermalt
     SetWindowPos(gTab, HWND_BOTTOM, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
 
@@ -916,6 +1063,13 @@ static void layout() {
     RECT c = {0, 0, tr.right - tr.left, tr.bottom - tr.top};
     TabCtrl_AdjustRect(gTab, FALSE, &c);
     int x = tr.left + c.left + S(12), y = tr.top + c.top + S(12);
+
+    // Admin-Knöpfe in der Reiterleiste rechts
+    {
+        int bh = std::max(S(22), (int)c.top - S(6)), by = tr.top + std::max(0, ((int)c.top - S(2) - bh) / 2);
+        place(IDC_ADMIN_LOGOUT, tr.right - S(4) - S(110), by, S(110), bh);
+        place(IDC_ADMIN_CHANGE, tr.right - S(4) - S(110) - S(6) - S(140), by, S(140), bh);
+    }
     int w = (c.right - c.left) - S(24), h = (c.bottom - c.top) - S(24);
 
     // --- Check-in
@@ -1019,6 +1173,7 @@ static void showPage(int page) {
     gCurrentPage = page;
     for (int p = 0; p < 3; ++p)
         for (HWND h : gPage[p]) ShowWindow(h, p == page ? SW_SHOW : SW_HIDE);
+    for (int id : {IDC_ADMIN_CHANGE, IDC_ADMIN_LOGOUT}) ShowWindow(ctl(id), page != 0 ? SW_SHOW : SW_HIDE);
     if (page == 0) SetFocus(ctl(IDC_CI_EDIT));
     if (page == 2) refreshHistory();
 }
@@ -1080,6 +1235,7 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_TIMER:
             invalidateHeader();
             if (gCurrentPage == 0) updatePresentDurations();
+            checkAdminIdle();
             return 0;
 
         case WM_ERASEBKGND:
@@ -1127,6 +1283,8 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
                 case IDC_F_TOGGLE: doToggleSelectedMember(); break;
                 case IDC_H_SEARCH: if (code == EN_CHANGE) refreshHistory(); break;
                 case IDC_H_EXPORT: doExportHistory(); break;
+                case IDC_ADMIN_CHANGE: doChangeAdmin(); break;
+                case IDC_ADMIN_LOGOUT: lockAdmin(L"Abgemeldet. Der Admin-Bereich ist gesperrt."); break;
                 case IDC_H_TODAY: setHistoryRange(util::today(), util::today()); break;
                 case IDC_H_MONTH: {
                     tm r{};
@@ -1161,7 +1319,13 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_NOTIFY: {
             auto nm = (NMHDR*)lp;
             if (nm->idFrom == IDC_TAB && nm->code == TCN_SELCHANGE) {
-                showPage(TabCtrl_GetCurSel(gTab));
+                int page = TabCtrl_GetCurSel(gTab);
+                if (page != 0 && !requireAdmin()) {
+                    TabCtrl_SetCurSel(gTab, gCurrentPage);  // Anmeldung abgebrochen: zurück
+                    if (gCurrentPage == 0) SetFocus(ctl(IDC_CI_EDIT));
+                    return 0;
+                }
+                showPage(page);
             } else if (nm->idFrom == IDC_M_LIST && nm->code == LVN_ITEMCHANGED && !gSuppressSelection) {
                 auto lv = (NMLISTVIEW*)lp;
                 if ((lv->uNewState & LVIS_SELECTED) && !(lv->uOldState & LVIS_SELECTED))
